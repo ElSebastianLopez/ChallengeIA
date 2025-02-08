@@ -4,6 +4,9 @@ import fitz  # PyMuPDF for extracting text
 from transformers import pipeline
 from typing import List, Dict
 import random
+import difflib
+import re
+import logging
 
 app = FastAPI(title="AI-powered Question Generation and Answer Validation API")
 
@@ -15,6 +18,9 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+# Configure logging
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 
 # Load the AI model for question generation
 generator = pipeline("text2text-generation", model="valhalla/t5-base-qg-hl")
@@ -106,6 +112,16 @@ async def generate_questions(file: UploadFile, difficulty: str = Form("medium"))
     
     return {"questions": questions[:10]}  # Return up to 10 questions with answers
 
+def clean_text(text: str) -> str:
+    """Normalize text by removing punctuation, extra spaces, and converting to lowercase."""
+    text = re.sub(r'[^a-zA-Z0-9 ]', '', text.lower()).strip()
+    return text
+def is_answer_correct(user_answer: str, correct_answer: str, threshold: float = 0.8) -> bool:
+    """Check if user answer is similar to correct answer based on a similarity threshold."""
+    user_answer_clean = clean_text(user_answer)
+    correct_answer_clean = clean_text(correct_answer)
+    similarity = difflib.SequenceMatcher(None, user_answer_clean, correct_answer_clean).ratio()
+    return similarity >= threshold
 
 @app.post("/validate_answers", response_model=Dict[str, str])
 async def validate_answers(file: UploadFile, question: str, user_answer: str):
@@ -117,12 +133,19 @@ async def validate_answers(file: UploadFile, question: str, user_answer: str):
     
     try:
         response = qa_pipeline(question=question, context=context)
-        correct_answer = response["answer"]
-        is_correct = "yes" if user_answer.strip().lower() in correct_answer.lower() else "no"
+        correct_answer = response.get("answer", "")
+        
+        if not correct_answer:
+            logger.warning(f"No valid answer found for question: {question}")
+            raise HTTPException(status_code=400, detail="No valid answer found in the context.")
+        
+        is_correct = "yes" if is_answer_correct(user_answer, correct_answer) else "no"
     except Exception as e:
+        logger.error(f"AI validation error: {str(e)}")
         raise HTTPException(status_code=500, detail=f"AI validation error: {str(e)}")
     
     return {"question": question, "user_answer": user_answer, "correct_answer": correct_answer, "is_correct": is_correct}
+
 
 
 @app.get("/")
